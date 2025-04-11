@@ -304,6 +304,20 @@ int main(int argc, char **argv)
     int ret = 0;
     if (rank == 0) {
         if (test_type == "spgemm") {
+
+            // std::cout << "=== Expected Result ===\n";
+            // for (const auto& entry : expected_result) {
+            //     std::cout << "(" << entry.first.first << ", " << entry.first.second 
+            //               << ") = " << entry.second << "\n";
+            // }
+        
+            // std::cout << "=== Computed Result ===\n";
+            // for (const auto& entry : complete_spgemm_result) {
+            //     std::cout << "(" << entry.first.first << ", " << entry.first.second 
+            //               << ") = " << entry.second << "\n";
+            // }
+
+
             std::sort(complete_spgemm_result.begin(), complete_spgemm_result.end());
             ret = correctness_check(complete_spgemm_result, expected_result);
         } else {

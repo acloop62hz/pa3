@@ -24,8 +24,8 @@ void distribute_matrix_2d(int m, int n, std::vector<std::pair<std::pair<int, int
     //get coords of the rank
     MPI_Cart_coords(comm_2d, rank, 2, coords);
     //calc total row & col
-    int numRow = m/dim;
-    int numCol = n/dim;
+    int numRow = (m + dim -1 ) / dim;
+    int numCol = (n + dim -1 ) / dim;
 
     int val, pRow, pCol, destRank;
     std::vector<int> sendCounts(size, 0);
@@ -60,7 +60,7 @@ void distribute_matrix_2d(int m, int n, std::vector<std::pair<std::pair<int, int
     //MPI ensure only the root scatters
     MPI_Scatter(sendCounts.data(), 1, MPI_INT, &recvcount, 1, MPI_INT, root, comm_2d);
 
-    std::vector<int> recvbuf(recvcount);
+    std::vector<int> recvbuf(std::max(1, recvcount));
     MPI_Scatterv(
         sendBuff.data(), sendCounts.data(), offset.data(), MPI_INT,
         recvbuf.data(), recvcount, MPI_INT, root, comm_2d
