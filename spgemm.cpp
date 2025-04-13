@@ -7,131 +7,128 @@
 #include <cassert>
 #include "functions.h"
 
-void sparse_multiply(
-    std::vector<std::pair<std::pair<int,int>, int>> &A,
-    std::vector<std::pair<std::pair<int,int>, int>> &B,
-    std::map<std::pair<int, int>, int> &C_map,
-    std::function<int(int, int)> plus,
-    std::function<int(int, int)> times       
-){
-
-    for (const auto &a : A){
-        int i = a.first.first;
-        int k = a.first.second;
-        int a_val = a.second;
-        for (const auto &b : B){
-            if (b.first.first == k){
-                int j = b.first.second;
-                int b_val = b.second;
-                auto key = std::make_pair(i,j);
-                int product = times(a_val, b_val);
-                if (product == 0) continue; 
-                if (C_map.count(key)){
-                    C_map[key] = plus(C_map[key], product);
-                }else{
-                    C_map[key] = product;
-                }
-            }
-        }
-    }
-}
-
 void spgemm_2d(int m, int p, int n,
-               std::vector<std::pair<std::pair<int,int>, int>> &A,
-               std::vector<std::pair<std::pair<int,int>, int>> &B,
-               std::vector<std::pair<std::pair<int,int>, int>> &C,
-               std::function<int(int, int)> plus, std::function<int(int, int)> times,
-               MPI_Comm row_comm, MPI_Comm col_comm)
+    std::vector<std::pair<std::pair<int,int>, int>>& A,
+    std::vector<std::pair<std::pair<int,int>, int>>& B,
+    std::vector<std::pair<std::pair<int,int>, int>>& C,
+    std::function<int(int,int)> plus,
+    std::function<int(int,int)> times,
+    MPI_Comm row_comm,
+    MPI_Comm col_comm)
 {
-    if (A.empty() && B.empty()) {
-        return;
-    }
-
-    // TODO: Write your code here
     int row_rank, col_rank;
     MPI_Comm_rank(row_comm, &row_rank);
     MPI_Comm_rank(col_comm, &col_rank);
 
-    int row_size, col_size;
-    MPI_Comm_size(row_comm, &row_size);
-    MPI_Comm_size(col_comm, &col_size);
+    int Q;
+    MPI_Comm_size(row_comm, &Q);
 
-    int dim = row_size;
+    C.clear();
 
-    std::vector<std::pair<std::pair<int,int>, int>> A_bcast, B_bcast;
-    std::map<std::pair<int, int>, int> C_map;
+    std::map<std::pair<int, int>, int> c_map;
 
-    for(int k = 0; k <dim; ++k){
-        // prepare A_bcast
-        A_bcast.clear();
-        if(row_rank == k){
-            A_bcast = A;
-        }
+    for (int k = 0; k < Q; ++k) {
+        // Broadcast A's k-th column block in row_comm
+        std::vector<std::pair<std::pair<int, int>, int>> A_part;
+        {
+            int send_a_count = (row_rank == k) ? static_cast<int>(A.size()) : 0;
+            std::vector<int> send_a_data;
+            send_a_data.reserve(3 * send_a_count);
+            if (row_rank == k) {
+                for (const auto &elem : A) {
+                    send_a_data.push_back(elem.first.first);
+                    send_a_data.push_back(elem.first.second);
+                    send_a_data.push_back(elem.second);
+                }
+            }
 
-        // broadcast A across row
-        int a_size = 0;
-        if (row_rank == k) a_size = A.size() * 3;
-        MPI_Bcast(&a_size, 1, MPI_INT, k, row_comm);
-        
+            int a_count;
+            MPI_Bcast(&send_a_count, 1, MPI_INT, k, row_comm);
+            a_count = send_a_count;
 
-        std::vector<int> a_buff(a_size);
-        if (row_rank == k) {
-            
-            for (size_t i = 0; i < A.size(); ++i) {
-                a_buff[i * 3 + 0] = A[i].first.first;
-                a_buff[i * 3 + 1] = A[i].first.second;
-                a_buff[i * 3 + 2] = A[i].second;
+            std::vector<int> recv_a_data(3 * a_count);
+            if (row_rank == k) {
+                std::copy(send_a_data.begin(), send_a_data.end(), recv_a_data.begin());
+            }
+            MPI_Bcast(recv_a_data.data(), 3 * a_count, MPI_INT, k, row_comm);
+
+            A_part.clear();
+            for (int i = 0; i < a_count; ++i) {
+                int a_row = recv_a_data[3 * i];
+                int a_col = recv_a_data[3 * i + 1];
+                int a_val = recv_a_data[3 * i + 2];
+                A_part.emplace_back(std::make_pair(a_row, a_col), a_val);
             }
         }
 
-        MPI_Bcast(a_buff.data(), a_size, MPI_INT, k, row_comm);
+        // Broadcast B's k-th row block in col_comm
+        std::vector<std::pair<std::pair<int, int>, int>> B_part;
+        {
+            int send_b_count = (col_rank == k) ? static_cast<int>(B.size()) : 0;
+            std::vector<int> send_b_data;
+            send_b_data.reserve(3 * send_b_count);
+            if (col_rank == k) {
+                for (const auto &elem : B) {
+                    send_b_data.push_back(elem.first.first);
+                    send_b_data.push_back(elem.first.second);
+                    send_b_data.push_back(elem.second);
+                }
+            }
 
-        if (row_rank != k && a_size > 0) {
-            A_bcast.resize(a_size / 3);
-            for (size_t i = 0; i < A_bcast.size(); ++i) {
-                A_bcast[i].first.first = a_buff[i * 3 + 0];
-                A_bcast[i].first.second = a_buff[i * 3 + 1];
-                A_bcast[i].second = a_buff[i * 3 + 2];
+            int b_count;
+            MPI_Bcast(&send_b_count, 1, MPI_INT, k, col_comm);
+            b_count = send_b_count;
+
+            std::vector<int> recv_b_data(3 * b_count);
+            if (col_rank == k) {
+                std::copy(send_b_data.begin(), send_b_data.end(), recv_b_data.begin());
+            }
+            MPI_Bcast(recv_b_data.data(), 3 * b_count, MPI_INT, k, col_comm);
+
+            B_part.clear();
+            for (int i = 0; i < b_count; ++i) {
+                int b_row = recv_b_data[3 * i];
+                int b_col = recv_b_data[3 * i + 1];
+                int b_val = recv_b_data[3 * i + 2];
+                B_part.emplace_back(std::make_pair(b_row, b_col), b_val);
             }
         }
 
-        // Prepare B_bcast
-        B_bcast.clear();
-        if (col_rank == k) {
-            B_bcast = B;
+        // Multiply A_part and B_part, accumulate into c_map
+        std::map<int, std::vector<std::pair<int, int>>> b_map;
+        for (const auto &elem : B_part) {
+            int brow = elem.first.first;
+            int bcol = elem.first.second;
+            int bval = elem.second;
+            b_map[brow].emplace_back(bcol, bval);
         }
-        // Broadcast B across column
-        int b_size = 0;
-        if (col_rank == k) b_size = B.size() * 3;
-        MPI_Bcast(&b_size, 1, MPI_INT, k, col_comm);
 
-        std::vector<int> b_buff(b_size);
-        if (col_rank == k) {
-            for (size_t i = 0; i < B.size(); ++i) {
-                b_buff[i * 3 + 0] = B[i].first.first;
-                b_buff[i * 3 + 1] = B[i].first.second;
-                b_buff[i * 3 + 2] = B[i].second;
+        for (const auto &a_elem : A_part) {
+            int arow = a_elem.first.first;
+            int acol = a_elem.first.second;
+            int aval = a_elem.second;
+
+            auto bit = b_map.find(acol);
+            if (bit != b_map.end()) {
+                for (const auto &bcol_val : bit->second) {
+                    int bc = bcol_val.first;
+                    int bv = bcol_val.second;
+                    int product = times(aval, bv);
+                    auto key = std::make_pair(arow, bc);
+                    auto cit = c_map.find(key);
+                    if (cit != c_map.end()) {
+                        cit->second = plus(cit->second, product);
+                    } else {
+                        c_map[key] = product;
+                    }
+                }
             }
         }
-        MPI_Bcast(b_buff.data(), b_size, MPI_INT, k, col_comm);
-
-        if (col_rank != k && b_size > 0) {
-            B_bcast.resize(b_size / 3);
-            for (size_t i = 0; i < B_bcast.size(); ++i) {
-                B_bcast[i].first.first = b_buff[i * 3 + 0];
-                B_bcast[i].first.second = b_buff[i * 3 + 1];
-                B_bcast[i].second = b_buff[i * 3 + 2];
-            }
-        }
-
-        if (a_size == 0 || b_size == 0)
-            continue;
-        // Multiply and accumulate
-        sparse_multiply(A_bcast, B_bcast, C_map, plus, times);
-        
     }
-    // Convert C_map into COO format for output
-    for (const auto &entry : C_map) {
+
+    // Convert c_map to C
+    C.reserve(c_map.size());
+    for (const auto &entry : c_map) {
         C.emplace_back(entry.first, entry.second);
     }
 

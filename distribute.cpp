@@ -6,85 +6,92 @@
 #include <cmath>
 #include <string>
 #include <sstream>
+#include <map>
 #include "functions.h"
 
-void distribute_matrix_2d(int m, int n, std::vector<std::pair<std::pair<int, int>, int>> &full_matrix,
-                          std::vector<std::pair<std::pair<int, int>, int>> &local_matrix,
-                          int root, MPI_Comm comm_2d)
+void distribute_matrix_2d(int m, int n,
+    std::vector<std::pair<std::pair<int, int>, int>> &full_matrix,
+    std::vector<std::pair<std::pair<int, int>, int>> &local_matrix,
+    int root, MPI_Comm comm_2d)
 {
-    // TODO: Write your code here
-    int rank, size;
+    int rank, p;
     MPI_Comm_rank(comm_2d, &rank);
-    MPI_Comm_size(comm_2d, &size);
+    MPI_Comm_size(comm_2d, &p);
+    local_matrix.clear();
 
-    int coords[2];
-    
-    //always square num of processors
-    int dim = static_cast<int>(std::sqrt(size));
-    //get coords of the rank
-    MPI_Cart_coords(comm_2d, rank, 2, coords);
-    //calc total row & col
-    int numRow = (m + dim -1 ) / dim;
-    int numCol = (n + dim -1 ) / dim;
+    if (rank == root) {
+        int q = static_cast<int>(sqrt(p));
+        int block_rows = m / q;
+        int remainder_rows = m % q;
+        int block_cols = n / q;
+        int remainder_cols = n % q;
 
-    int val, pRow, pCol, destRank;
-    std::vector<int> sendCounts(size, 0);
-    std::vector<int> offset(size, 0);
-    std::vector<int> sendBuff;
-    if (rank == 0){
-        //sort
-        std::unordered_map<int, std::vector<int>> pMap;
-        for (const auto &element : full_matrix){
-            val = element.second;
-            pRow = std::min((element.first.first)/numRow,dim-1);
-            pCol = std::min((element.first.second)/numCol,dim-1);
-            int destCoords[2] = { pRow, pCol };
-            // std::cout << pRow << ", " << pCol << std::endl;
-            MPI_Cart_rank(comm_2d, destCoords, &destRank); //get dest rank
-            pMap[destRank].push_back(element.first.first);
-            pMap[destRank].push_back(element.first.second);
-            pMap[destRank].push_back(val);
+        std::map<int, std::vector<std::pair<std::pair<int, int>, int>>> elements_map;
+
+        for (const auto& elem : full_matrix) {
+            int i = elem.first.first;
+            int j = elem.first.second;
+
+            // Calculate pi
+            int pi;
+            if (i < remainder_rows * (block_rows + 1)) {
+                pi = i / (block_rows + 1);
+            } else {
+                int adjusted_i = i - remainder_rows * (block_rows + 1);
+                pi = remainder_rows + adjusted_i / block_rows;
+            }
+
+            // Calculate pj
+            int pj;
+            if (j < remainder_cols * (block_cols + 1)) {
+                pj = j / (block_cols + 1);
+            } else {
+                int adjusted_j = j - remainder_cols * (block_cols + 1);
+                pj = remainder_cols + adjusted_j / block_cols;
+            }
+
+            // Determine destination rank
+            int coords[2] = {pi, pj};
+            int dest_rank;
+            MPI_Cart_rank(comm_2d, coords, &dest_rank);
+            elements_map[dest_rank].push_back(elem);
         }
-        //prep scatter
-        int currOffSet = 0;
-        for (int r = 0; r < size; ++r) {
-            const auto &data = pMap[r];
-            sendCounts[r] = data.size();
-            offset[r] = currOffSet;
-            sendBuff.insert(sendBuff.end(), data.begin(), data.end());
-            currOffSet += data.size();
+
+        // Distribute the elements
+        for (int dest = 0; dest < p; ++dest) {
+            auto it = elements_map.find(dest);
+            int count = (it != elements_map.end()) ? it->second.size() : 0;
+
+            if (dest == root) {
+                if (count > 0) {
+                    local_matrix.insert(local_matrix.end(), it->second.begin(), it->second.end());
+                }
+            } else {
+                MPI_Send(&count, 1, MPI_INT, dest, 0, comm_2d);
+                if (count > 0) {
+                    std::vector<int> buffer;
+                    buffer.reserve(3 * count);
+                    for (const auto& elem : it->second) {
+                        buffer.push_back(elem.first.first);
+                        buffer.push_back(elem.first.second);
+                        buffer.push_back(elem.second);
+                    }
+                    MPI_Send(buffer.data(), 3 * count, MPI_INT, dest, 1, comm_2d);
+                }
+            }
+        }
+    } else {
+        int count;
+        MPI_Recv(&count, 1, MPI_INT, root, 0, comm_2d, MPI_STATUS_IGNORE);
+        if (count > 0) {
+            std::vector<int> buffer(3 * count);
+            MPI_Recv(buffer.data(), 3 * count, MPI_INT, root, 1, comm_2d, MPI_STATUS_IGNORE);
+            for (int k = 0; k < count; ++k) {
+                int i = buffer[3 * k];
+                int j = buffer[3 * k + 1];
+                int val = buffer[3 * k + 2];
+                local_matrix.emplace_back(std::make_pair(i, j), val);
+            }
         }
     }
-    //scatter
-    int recvcount;
-    //MPI ensure only the root scatters
-    MPI_Scatter(sendCounts.data(), 1, MPI_INT, &recvcount, 1, MPI_INT, root, comm_2d);
-
-    std::vector<int> recvbuf(std::max(1, recvcount));
-    MPI_Scatterv(
-        sendBuff.data(), sendCounts.data(), offset.data(), MPI_INT,
-        recvbuf.data(), recvcount, MPI_INT, root, comm_2d
-    );
-
-        for (size_t i = 0; i < recvbuf.size(); i += 3) {
-        int row = recvbuf[i];
-        int col = recvbuf[i + 1];
-        int val = recvbuf[i + 2];
-        local_matrix.emplace_back(std::make_pair(std::make_pair(row, col), val));
-    }
-    // MPI_Barrier(comm_2d);
-
-    // for (int p = 0; p < size; ++p) {
-    // if (rank == p) {
-    //     std::cout << "Rank " << rank << " received:\n";
-    //     for (const auto &entry : local_matrix) {
-    //         int i = entry.first.first;
-    //         int j = entry.first.second;
-    //         int val = entry.second;
-    //         std::cout << "  (" << i << ", " << j << ") = " << val << "\n";
-    //     }
-    //     std::cout << std::flush;
-    // }
-    // MPI_Barrier(comm_2d); // ensure ordered printing
-    // }
 }
